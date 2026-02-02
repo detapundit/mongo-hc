@@ -1,3 +1,13 @@
+
+  File "/opt/agg-monsum/agg_ai.py", line 68, in <module>
+    client = OpenAI()
+             ^^^^^^^^
+  File "/opt/agg-monsum/venv/lib64/python3.12/site-packages/openai/_client.py", line 137, in __init__
+    raise OpenAIError(
+openai.OpenAIError: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable
+
+
+
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -130,7 +140,8 @@ def generate_ai_summary(deployment: dict) -> str:
         count_tokens(json.dumps(trimmed))
     )
 
-    try:
+
+try:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
