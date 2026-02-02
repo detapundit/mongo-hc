@@ -1,3 +1,31 @@
+Can see payload
+2026-02-02 08:08:03,151 | INFO | aggregator | Payload ingested | deployment=mongo-demo-01 | host=ip-172-31-17-209.ec2.internal
+2026-02-02 08:08:33,363 | INFO | aggregator | Payload ingested | deployment=mongo-demo-01 | host=ip-172-31-17-209.ec2.internal
+
+
+Curl output:
+
+curl http://127.0.0.1:8080/summary/mongo-demo-01
+<!doctype html>
+<html lang=en>
+<title>500 Internal Server Error</title>
+<h1>Internal Server Error</h1>
+<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>
+
+
+In aggreagator logs can see below error:
+
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/agg-monsum/agg_ai.py", line 250, in summary
+    "index_analysis": analyze_indexes(slow, indexes),
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/agg-monsum/agg_ai.py", line 122, in analyze_indexes
+    key = tuple(idx["key"].keys())
+                ~~~^^^^^^^
+TypeError: string indices must be integers, not 'str'
+
+
 2026-02-02 06:05:15,708 | WARNING | aggregator | Invalid ingest payload: {'agent_id': 'mongo-demo-01', 'host': 'ip-172-31-17-209.ec2.internal',:
 
 
