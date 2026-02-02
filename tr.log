@@ -3,6 +3,7 @@
 openai.AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-proj-********************************************************************************************************************************************************recA. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'code': 'invalid_api_key', 'param': None}, 'status': 401}
 
 
+| OpenAI key debug | len=164 | prefix=sk-proj-A6 | suffix=G
 
 Can see payload
 2026-02-02 08:08:03,151 | INFO | aggregator | Payload ingested | deployment=mongo-demo-01 | host=ip-172-31-17-209.ec2.internal
