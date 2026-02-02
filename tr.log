@@ -5,3 +5,15 @@ curl http://127.0.0.1:8080/summary/mongo-demo-01
 
 
 {"error":"unknown deployment"}
+
+
+
+
+  File "/opt/agg-monsum/agg_ai.py", line 252, in summary
+    "upgrade_advisor": mongo_upgrade_advisor(version)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/agg-monsum/agg_ai.py", line 173, in mongo_upgrade_advisor
+    current_major = ".".join(current_version.split(".")[:2])
+                             ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'split'
+(END)
