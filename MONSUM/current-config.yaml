@@ -1,0 +1,24 @@
+agent:
+  id: mongo-demo-01
+  interval_seconds: 60
+
+paths:
+  data_dir: /opt/monsum/data
+
+logs:
+  mongod_log: /var/log/mongodb/mongod.log
+  slow_query_threshold_ms: 300
+
+mongo:
+  uri: mongodb://localhost:27017
+  connect_timeout_ms: 2000
+
+aggregator:
+  endpoint: http://localhost:8080/ingest
+  timeout_seconds: 5
+
+features:
+  collect_host_metrics: true
+  collect_mongo_metrics: true
+  collect_indexes: true
+  collect_packages: true
