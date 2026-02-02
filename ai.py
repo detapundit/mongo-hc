@@ -1,4 +1,9 @@
 
+
+  File "/opt/agg-monsum/agg_ai.py", line 276, in ingest
+    logger.warning("Invalid ingest payload: %s", payload)
+
+
   File "/opt/agg-monsum/agg_ai.py", line 68, in <module>
     client = OpenAI()
              ^^^^^^^^
