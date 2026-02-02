@@ -2,7 +2,6 @@
     raise self._make_status_error_from_response(err.response) from None
 openai.AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-proj-********************************************************************************************************************************************************recA. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'code': 'invalid_api_key', 'param': None}, 'status': 401}
 
-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
 
 
 Can see payload
