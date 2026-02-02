@@ -1,4 +1,21 @@
 
+[2026-02-02 11:25:08,401] ERROR in app: Exception on /ingest [POST]
+Traceback (most recent call last):
+  File "/opt/agg-monsum/venv/lib64/python3.12/site-packages/flask/app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/agg-monsum/venv/lib64/python3.12/site-packages/flask/app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/agg-monsum/venv/lib64/python3.12/site-packages/flask/app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/agg-monsum/venv/lib64/python3.12/site-packages/flask/app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/agg-monsum/agg_ai.py", line 309, in ingest
+    logger.info("Payload ingested | deployment=%s | host=%s", did, host)
+
 
 /opt/agg-monsum/venv/bin/python3.12 agg_ai.py
 Traceback (most recent call last):
