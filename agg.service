@@ -10,3 +10,10 @@ EnvironmentFile=/etc/monsum/aggregator.env
 sudo systemctl daemon-reload
 sudo systemctl restart monsum-aggregator
 sudo systemctl show monsum-aggregator | grep OPENAI
+
+
+
+  File "/opt/agg-monsum/agg_ai.py", line 21, in <module>
+    AGGREGATOR_ID = AGG["id"]
+                    ~~~^^^^^^
+KeyError: 'id'
