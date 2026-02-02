@@ -1,4 +1,10 @@
 
+  File "/opt/agg-monsum/agg_ai.py", line 353, in ingest
+    logger.info("Payload ingested | deployment=%s | host=%s", deployment_id, host)
+                                                              ^^^^^^^^^^^^^
+
+
+
 [2026-02-02 11:25:08,401] ERROR in app: Exception on /ingest [POST]
 Traceback (most recent call last):
   File "/opt/agg-monsum/venv/lib64/python3.12/site-packages/flask/app.py", line 1511, in wsgi_app
