@@ -1,197 +1,175 @@
+import os
 import json
 import time
-import logging
-import psutil
+import yaml
 import socket
-import subprocess
+import psutil
 import requests
 from datetime import datetime, timezone
 from pymongo import MongoClient
-from pygtail import Pygtail
-import re
+from typing import Dict, Any
 
+# ---------------- CONFIG LOADER ---------------- #
 
-# ---------------- CONFIG ---------------- #
+def load_config(path="config.yaml") -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
 
-MONGO_URI = "mongodb://localhost:27017"
-MONGO_LOG_FILE = "./data/mongod.log"
-AGGREGATOR_URL = "http://JUMP_SERVER:8000/collect"
+CONFIG = load_config()
 
-SLOW_QUERY_THRESHOLD_MS = 500
+# ---------------- GLOBALS FROM CONFIG ---------------- #
 
-HOST_METRIC_INTERVAL = 300        # 5 min
-SERVERSTATUS_INTERVAL = 900       # 15 min
-INDEX_INTERVAL = 86400            # daily
-PACKAGE_INTERVAL = 86400          # daily
-SEND_INTERVAL = 60                # batch send
+AGENT_ID = CONFIG["agent"]["id"]
+INTERVAL = CONFIG["agent"]["interval_seconds"]
 
-# --------------------------------------- #
+DATA_DIR = CONFIG["paths"]["data_dir"]
+OFFSET_DIR = os.path.join(DATA_DIR, "offsets")
+BUFFER_DIR = os.path.join(DATA_DIR, "buffers")
+INVENTORY_DIR = os.path.join(DATA_DIR, "inventory")
 
-logging.basicConfig(level=logging.INFO)
+MONGO_LOG_FILE = CONFIG["logs"]["mongod_log"]
+SLOW_QUERY_MS = CONFIG["logs"]["slow_query_threshold_ms"]
 
-hostname = socket.gethostname()
-client = MongoClient(MONGO_URI)
+MONGO_URI = CONFIG["mongo"]["uri"]
+CONNECT_TIMEOUT = CONFIG["mongo"]["connect_timeout_ms"]
 
-buffer = {
-    "slow_logs": [],
-    "errors": [],
-    "warnings": [],
-    "host_metrics": [],
-    "server_status": [],
-    "indexes": None,
-    "packages": None,
-    "mongo_version": None
-}
+AGG_ENDPOINT = CONFIG["aggregator"]["endpoint"]
+AGG_TIMEOUT = CONFIG["aggregator"]["timeout_seconds"]
 
-last = {
-    "host": 0,
-    "server": 0,
-    "index": 0,
-    "package": 0,
-    "send": 0
-}
+HOSTNAME = socket.gethostname()
 
-# ---------------- Mongo Helpers ---------------- #
+# Ensure dirs exist
+for d in [OFFSET_DIR, BUFFER_DIR, INVENTORY_DIR]:
+    os.makedirs(d, exist_ok=True)
 
-def detect_topology():
-    hello = client.admin.command("hello")
-    if hello.get("msg") == "isdbgrid":
-        return {"type": "sharded", "id": "cluster"}
-    if "setName" in hello:
-        return {"type": "replicaset", "id": hello["setName"]}
-    return {"type": "standalone", "id": hostname}
+# ---------------- UTILS ---------------- #
 
-TOPOLOGY = detect_topology()
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
 
-def collect_server_status():
-    ss = client.admin.command("serverStatus")
-    data = {
-        "timestamp": time.time(),
-        "connections": ss["connections"],
-        "opcounters": ss["opcounters"],
-        "locks": ss.get("locks", {}),
-        "wiredTiger_cache": ss.get("wiredTiger", {}).get("cache", {}),
-    }
+# ---------------- TOPOLOGY DETECTION ---------------- #
 
-    # replication lag
-    if TOPOLOGY["type"] == "replicaset":
-        status = client.admin.command("replSetGetStatus")
-        primary = next(m for m in status["members"] if m["stateStr"] == "PRIMARY")
-        lag = {}
-        for m in status["members"]:
-            if m["stateStr"] == "SECONDARY":
-                lag[m["name"]] = primary["optimeDate"] - m["optimeDate"]
-        data["replication_lag"] = {k: v.total_seconds() for k, v in lag.items()}
+def detect_mongo_topology(client: MongoClient) -> dict:
+    try:
+        hello = client.admin.command("hello")
+        if "setName" in hello:
+            return {
+                "type": "replicaset",
+                "replicaSet": hello["setName"],
+                "me": hello.get("me"),
+                "primary": hello.get("primary")
+            }
 
-    return data
+        shards = client.admin.command("listShards")
+        return {
+            "type": "sharded",
+            "cluster": True,
+            "shards": [s["_id"] for s in shards["shards"]]
+        }
+    except Exception:
+        return {"type": "standalone"}
 
-def collect_indexes():
-    result = {}
-    for db in client.list_database_names():
-        result[db] = {}
-        for coll in client[db].list_collection_names():
-            result[db][coll] = list(client[db][coll].list_indexes())
-    return result
+# ---------------- HOST METRICS ---------------- #
 
-def mongo_version():
-    return client.server_info()["version"]
-    
-def extract_query_shape(log):
-    attr = log.get("attr", {})
-    command = attr.get("command", {})
-    if not command:
-        return None
-
+def collect_host_metrics() -> dict:
     return {
-        "db": attr.get("ns", "").split(".")[0],
-        "collection": attr.get("ns", "").split(".")[1],
-        "filter": command.get("filter", {}),
-        "sort": command.get("sort", {}),
-        "duration_ms": attr.get("durationMillis", 0),
-        "planSummary": attr.get("planSummary", "")
-    }
-
-# ---------------- Host Helpers ---------------- #
-
-def collect_host_metrics():
-    return {
-        "timestamp": time.time(),
-        "cpu": psutil.cpu_percent(),
-        "memory": psutil.virtual_memory().percent,
+        "cpu_percent": psutil.cpu_percent(interval=1),
+        "memory": psutil.virtual_memory()._asdict(),
         "disk": [
             {
                 "mount": p.mountpoint,
-                "used": psutil.disk_usage(p.mountpoint).percent
+                "used_percent": psutil.disk_usage(p.mountpoint).percent
             }
-            for p in psutil.disk_partitions(all=False)
+            for p in psutil.disk_partitions()
         ]
     }
 
-def collect_packages():
-    try:
-        out = subprocess.check_output(["rpm", "-qa"], stderr=subprocess.DEVNULL)
-        return out.decode().splitlines()
-    except Exception:
-        return []
+# ---------------- MONGO METRICS ---------------- #
 
-# ---------------- Log Processing ---------------- #
+def collect_mongo_metrics(client: MongoClient) -> dict:
+    server_status = client.admin.command("serverStatus")
+    return {
+        "version": server_status["version"],
+        "connections": server_status["connections"],
+        "opcounters": server_status["opcounters"]
+    }
 
-def process_logs():
-    for line in Pygtail(MONGO_LOG_FILE):
-        try:
-            log = json.loads(line)
-        except:
+# ---------------- INDEX INVENTORY ---------------- #
+
+def collect_index_inventory(client: MongoClient) -> dict:
+    inventory = {}
+    for db in client.list_database_names():
+        if db in ("admin", "local", "config"):
             continue
+        inventory[db] = {}
+        for coll in client[db].list_collection_names():
+            inventory[db][coll] = list(client[db][coll].list_indexes())
+    return inventory
 
-        msg = log.get("msg", "")
-        sev = log.get("s")
+# ---------------- PACKAGE INVENTORY ---------------- #
 
-        if sev == "E":
-            buffer["errors"].append(log)
-        elif sev == "W":
-            buffer["warnings"].append(log)
-        elif msg == "Slow query":
-            dur = log.get("attr", {}).get("durationMillis", 0)
-            if dur >= SLOW_QUERY_THRESHOLD_MS:
-                shape = extract_query_shape(log)
-                if shape:
-                    buffer["slow_logs"].append(shape)
+def collect_packages() -> list:
+    pkgs = []
+    try:
+        for p in os.popen("rpm -qa --qf '%{NAME} %{VERSION}\n'"):
+            name, version = p.strip().split()
+            pkgs.append({"name": name, "version": version})
+    except Exception:
+        pass
+    return pkgs
 
-# ---------------- Main Loop ---------------- #
+# ---------------- PAYLOAD BUILDER ---------------- #
 
-while True:
-    now = time.time()
+def build_payload() -> Dict[str, Any]:
+    payload = {
+        "agent_id": AGENT_ID,
+        "host": HOSTNAME,
+        "timestamp": utc_now(),
+    }
 
-    process_logs()
+    with MongoClient(
+        MONGO_URI,
+        serverSelectionTimeoutMS=CONNECT_TIMEOUT
+    ) as client:
 
-    if now - last["host"] >= HOST_METRIC_INTERVAL:
-        buffer["host_metrics"].append(collect_host_metrics())
-        last["host"] = now
+        payload["topology"] = detect_mongo_topology(client)
 
-    if now - last["server"] >= SERVERSTATUS_INTERVAL:
-        buffer["server_status"].append(collect_server_status())
-        last["server"] = now
+        if CONFIG["features"]["collect_mongo_metrics"]:
+            payload["mongo_metrics"] = collect_mongo_metrics(client)
 
-    if now - last["index"] >= INDEX_INTERVAL:
-        buffer["indexes"] = collect_indexes()
-        last["index"] = now
+        if CONFIG["features"]["collect_indexes"]:
+            payload["index_inventory"] = collect_index_inventory(client)
 
-    if now - last["package"] >= PACKAGE_INTERVAL:
-        buffer["packages"] = collect_packages()
-        buffer["mongo_version"] = mongo_version()
-        last["package"] = now
+    if CONFIG["features"]["collect_host_metrics"]:
+        payload["host_metrics"] = collect_host_metrics()
 
-    if now - last["send"] >= SEND_INTERVAL:
-        payload = {
-            "host": hostname,
-            "topology": TOPOLOGY,
-            "data": buffer
-        }
-        try:
-            requests.post(AGGREGATOR_URL, json=payload, timeout=5)
-            buffer = {k: [] if isinstance(v, list) else None for k, v in buffer.items()}
-        except Exception as e:
-            logging.error(e)
-        last["send"] = now
+    if CONFIG["features"]["collect_packages"]:
+        payload["package_inventory"] = collect_packages()
 
-    time.sleep(1)
+    return payload
+
+# ---------------- HTTP SENDER ---------------- #
+
+def send_payload(payload: dict):
+    try:
+        r = requests.post(
+            AGG_ENDPOINT,
+            json=payload,
+            timeout=AGG_TIMEOUT
+        )
+        r.raise_for_status()
+    except Exception as e:
+        fname = f"{BUFFER_DIR}/{int(time.time())}.json"
+        with open(fname, "w") as f:
+            json.dump(payload, f)
+
+# ---------------- MAIN LOOP ---------------- #
+
+def main():
+    while True:
+        payload = build_payload()
+        send_payload(payload)
+        time.sleep(INTERVAL)
+
+if __name__ == "__main__":
+    main()
