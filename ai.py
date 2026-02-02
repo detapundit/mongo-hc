@@ -1,3 +1,26 @@
+import logging
+
+# Initialize logger
+logger = logging.getLogger("aggregator")
+
+# Optional: if using config.yaml logging settings
+import yaml
+with open("/opt/agg-monsum/config.yaml") as f:
+    CONFIG = yaml.safe_load(f)
+
+LOG_CFG = CONFIG.get("logging", {})
+level = getattr(logging, LOG_CFG.get("level", "INFO").upper(), logging.INFO)
+log_file = LOG_CFG.get("file", "aggregator.log")
+fmt = LOG_CFG.get("format", "%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+max_bytes = LOG_CFG.get("max_size_mb", 10) * 1024 * 1024
+backup_count = LOG_CFG.get("backup_count", 3)
+
+handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
+formatter = logging.Formatter(fmt)
+handler.setFormatter(formatter)
+
+logger.addHandler(handler)
+logger.setLevel(level)
 
 
   File "/opt/agg-monsum/agg_ai.py", line 276, in ingest
