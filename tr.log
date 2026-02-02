@@ -1,4 +1,12 @@
 
+
+
+  File "/opt/agg-monsum/agg_ai.py", line 69
+    logger.info("Aggregator starting")
+                                      ^
+IndentationError: unindent does not match any outer indentation level
+
+
   File "/opt/agg-monsum/agg_ai.py", line 353, in ingest
     logger.info("Payload ingested | deployment=%s | host=%s", deployment_id, host)
                                                               ^^^^^^^^^^^^^
