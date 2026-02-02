@@ -1,0 +1,7 @@
+2026-02-02 06:05:15,708 | WARNING | aggregator | Invalid ingest payload: {'agent_id': 'mongo-demo-01', 'host': 'ip-172-31-17-209.ec2.internal',:
+
+
+curl http://127.0.0.1:8080/summary/mongo-demo-01
+
+
+{"error":"unknown deployment"}
