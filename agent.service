@@ -1,0 +1,18 @@
+[Unit]
+Description=Mongo Monitoring Agent (MonSum)
+After=network.target mongod.service
+
+[Service]
+Type=simple
+User=monsum
+Group=monsum
+WorkingDirectory=/opt/monsum
+ExecStart=/opt/monsum/venv/bin/python agent.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/monsum/logs/agent.log
+StandardError=append:/opt/monsum/logs/agent.log
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
