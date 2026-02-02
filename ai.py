@@ -6,16 +6,16 @@ from collections import defaultdict
 from typing import Dict, List
 from dotenv import load_dotenv
 import os
+import logging
+from logging.handlers import RotatingFileHandler
 
 from flask import Flask, request, jsonify
 from openai import OpenAI
 import tiktoken
 
-
 # ---------------- CONFIG LOADING ---------------- #
 
 CONFIG_PATH = "/opt/agg-monsum/config.yaml"
-
 with open(CONFIG_PATH, "r") as f:
     CONFIG = yaml.safe_load(f)
 
@@ -32,13 +32,10 @@ OSV_API = AGG["feeds"]["osv_api"]
 LATEST_MONGO_MAJOR = AGG["mongo"]["preferred_major"]
 TRIM_FIELDS = set(AGG["trimming"]["drop_fields"])
 
-import logging
-from logging.handlers import RotatingFileHandler
-import os
+# ---------------- LOGGING SETUP ---------------- #
 
 def setup_logging(cfg: dict):
     log_cfg = cfg.get("logging", {})
-
     level = getattr(logging, log_cfg.get("level", "INFO").upper())
     log_file = log_cfg.get("file", "/opt/monsum/logs/aggregator.log")
     max_mb = log_cfg.get("max_size_mb", 20)
@@ -49,7 +46,6 @@ def setup_logging(cfg: dict):
     )
 
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
-
     handler = RotatingFileHandler(
         log_file,
         maxBytes=max_mb * 1024 * 1024,
@@ -64,6 +60,9 @@ def setup_logging(cfg: dict):
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+setup_logging(CONFIG)
+logger = logging.getLogger("aggregator")
+logger.info("Aggregator starting | ID=%s", AGGREGATOR_ID)
 
 # ---------------- APP INIT ---------------- #
 
@@ -103,9 +102,7 @@ def detect_topology(agent_payload: dict) -> dict:
 # ---------------- INDEX ADVISOR ---------------- #
 
 def analyze_indexes(slow_queries: List[dict], indexes: dict) -> dict:
-    recommendations = []
-    redundant = []
-
+    recommendations, redundant = [], []
     seen_patterns = set()
 
     for q in slow_queries:
@@ -113,7 +110,6 @@ def analyze_indexes(slow_queries: List[dict], indexes: dict) -> dict:
         if not shape or shape in seen_patterns:
             continue
         seen_patterns.add(shape)
-
         recommendations.append({
             "namespace": q["ns"],
             "suggested_index": list(shape),
@@ -134,66 +130,40 @@ def analyze_indexes(slow_queries: List[dict], indexes: dict) -> dict:
                 "indexes": names
             })
 
-    return {
-        "recommended_indexes": recommendations,
-        "redundant_indexes": redundant
-    }
+    return {"recommended_indexes": recommendations, "redundant_indexes": redundant}
 
 # ---------------- CVE LOOKUP ---------------- #
 
 def lookup_os_cves(packages: List[dict]) -> List[dict]:
     findings = []
-
-    for p in packages:
-        query = {
-            "package": {
-                "name": p["name"],
-                "ecosystem": "Linux"
-            }
-        }
-        try:
-            r = requests.post(OSV_API, json=query, timeout=5)
-            if not r.ok:
-                continue
-            for v in r.json().get("vulns", []):
-                findings.append({
-                    "package": p["name"],
-                    "cve": v["id"],
-                    "summary": v.get("summary")
-                })
-        except Exception:
-            continue
-
-    return findings
-
-# ---------------------- CVE LOOKUPS ---------------------- #
-def lookup_os_cves(packages: List[dict]) -> List[dict]:
-    findings = []
-
-    logger.info("OS CVE lookup started | packages=%d", len(packages))
-
+    logger.info("OS CVE lookup | packages=%d", len(packages))
     for p in packages:
         try:
-            r = requests.post(OSV_API, json={
-                "package": {"name": p["name"], "ecosystem": "Linux"}
-            }, timeout=5)
-
+            r = requests.post(OSV_API, json={"package": {"name": p["name"], "ecosystem": "Linux"}}, timeout=5)
             if not r.ok:
-                logger.debug("OSV lookup failed for package %s", p["name"])
+                logger.debug("OSV lookup failed for %s", p["name"])
                 continue
-
             for v in r.json().get("vulns", []):
-                findings.append({
-                    "package": p["name"],
-                    "cve": v["id"],
-                    "summary": v.get("summary")
-                })
-
+                findings.append({"package": p["name"], "cve": v["id"], "summary": v.get("summary")})
         except Exception as e:
             logger.debug("OSV exception for %s: %s", p["name"], e)
-
     logger.info("OS CVE findings=%d", len(findings))
     return findings
+
+def lookup_mongo_cves(mongo_version: str) -> List[dict]:
+    try:
+        r = requests.get(MONGO_CVE_FEED, timeout=10)
+        if not r.ok:
+            return []
+    except Exception:
+        return []
+
+    findings = []
+    for item in r.json():
+        if mongo_version in item.get("affected_versions", []):
+            findings.append({"cve": item["cve"], "severity": item.get("severity"), "description": item.get("description")})
+    return findings
+
 # ---------------- VERSION ADVISOR ---------------- #
 
 SUPPORTED_MAJORS = AGG["mongo"]["supported_majors"]
@@ -201,32 +171,19 @@ PREFERRED_MAJOR = AGG["mongo"]["preferred_major"]
 
 def mongo_upgrade_advisor(current_version: str) -> dict:
     current_major = ".".join(current_version.split(".")[:2])
-
     if current_major in SUPPORTED_MAJORS:
         if current_major == PREFERRED_MAJOR:
-            return {
-                "status": "optimal",
-                "current": current_version
-            }
-        return {
-            "status": "supported_but_not_preferred",
-            "current": current_version,
-            "recommended": PREFERRED_MAJOR
-        }
+            return {"status": "optimal", "current": current_version}
+        return {"status": "supported_but_not_preferred", "current": current_version, "recommended": PREFERRED_MAJOR}
+    return {"status": "upgrade_required", "current": current_version, "recommended": PREFERRED_MAJOR}
 
-    return {
-        "status": "upgrade_required",
-        "current": current_version,
-        "recommended": PREFERRED_MAJOR
-    }
 # ---------------- AI SUMMARY ---------------- #
 
 def generate_ai_summary(deployment: dict) -> str:
     trimmed = trim_payload(deployment, MAX_AI_TOKENS)
-
+    logger.info("Generating AI summary | deployment=%s | tokens=%d", deployment.get("deployment_id"), count_tokens(json.dumps(trimmed)))
     system_prompt = """
 You are a senior MongoDB SRE.
-
 Analyze the deployment summary and provide:
 - Key risks
 - Performance bottlenecks
@@ -234,26 +191,15 @@ Analyze the deployment summary and provide:
 - Security vulnerabilities (MongoDB + OS)
 - Upgrade advice
 - Overall health verdict
-
 Be concise and technical.
 """
-    logger.info(
-        "Generating AI summary | deployment=%s | tokens=%d",
-        deployment.get("deployment_id"),
-        count_tokens(json.dumps(trimmed))
-    )
-
     try:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(trimmed, indent=2)}
-            ],
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(trimmed, indent=2)}],
             temperature=AI_TEMPERATURE
         )
         return response.choices[0].message.content
-
     except Exception:
         logger.exception("AI summary generation failed")
         return "AI summary unavailable"
@@ -263,38 +209,26 @@ Be concise and technical.
 @app.route("/ingest", methods=["POST"])
 def ingest():
     payload = request.json
-
     if not payload:
-        logger.warning("Empty ingest payload received")
+        logger.warning("Empty ingest payload")
         return jsonify({"error": "empty payload"}), 400
 
     deployment_id = payload.get("deployment_id")
     host = payload.get("host")
-
     if not deployment_id or not host:
         logger.warning("Invalid ingest payload: %s", payload)
         return jsonify({"error": "invalid payload"}), 400
 
-    DEPLOYMENTS.setdefault(deployment_id, {
-        "hosts": {},
-        "created": datetime.now(timezone.utc).isoformat()
-    })
-
+    DEPLOYMENTS.setdefault(deployment_id, {"hosts": {}, "created": datetime.now(timezone.utc).isoformat()})
     DEPLOYMENTS[deployment_id]["hosts"][host] = payload
-
-    logger.info(
-        "Ingested payload | deployment=%s | host=%s",
-        deployment_id, host
-    )
-
+    logger.info("Payload ingested | deployment=%s | host=%s", deployment_id, host)
     return jsonify({"status": "ok", "aggregator": AGGREGATOR_ID})
 
 # ---------------- SUMMARY API ---------------- #
 
 @app.route("/summary/<deployment_id>")
 def summary(deployment_id):
-    logger.info("Summary requested for deployment %s", deployment_id)
-
+    logger.info("Summary requested | deployment=%s", deployment_id)
     d = DEPLOYMENTS.get(deployment_id)
     if not d:
         logger.warning("Unknown deployment requested: %s", deployment_id)
@@ -302,7 +236,6 @@ def summary(deployment_id):
 
     slow, indexes, os_packages = [], {}, []
     mongo_versions = set()
-
     for h in d["hosts"].values():
         slow.extend(h.get("slow_queries", []))
         indexes.update(h.get("indexes", {}))
@@ -310,31 +243,34 @@ def summary(deployment_id):
         mongo_versions.add(h.get("mongo_version"))
 
     version = next(iter(mongo_versions))
+    deployment_summary = {
+        "deployment_id": deployment_id,
+        "topology": detect_topology(next(iter(d["hosts"].values()))),
+        "mongo_version": list(mongo_versions),
+        "index_analysis": analyze_indexes(slow, indexes),
+        "security": {"os_cves": lookup_os_cves(os_packages), "mongo_cves": lookup_mongo_cves(version)},
+        "upgrade_advisor": mongo_upgrade_advisor(version)
+    }
+    deployment_summary["ai_summary"] = generate_ai_summary(deployment_summary)
+    return jsonify(deployment_summary)
 
 # ---------------- COMPARISON API ---------------- #
 
 @app.route("/compare")
 def compare():
     logger.info("Multi-deployment comparison requested")
-
     return jsonify({
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "deployments": [
             {
                 "deployment": did,
                 "hosts": len(d["hosts"]),
-                "mongo_versions": list(set(
-                    h.get("mongo_version") for h in d["hosts"].values()
-                ))
-            }
-            for did, d in DEPLOYMENTS.items()
+                "mongo_versions": list(set(h.get("mongo_version") for h in d["hosts"].values()))
+            } for did, d in DEPLOYMENTS.items()
         ]
     })
 
 # ---------------- MAIN ---------------- #
 
 if __name__ == "__main__":
-    app.run(
-        host=AGG["server"]["bind_host"],
-        port=AGG["server"]["port"]
-    )
+    app.run(host=AGG["server"]["bind_host"], port=AGG["server"]["port"])
