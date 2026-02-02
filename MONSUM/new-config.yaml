@@ -1,0 +1,78 @@
+# =========================================================
+# GLOBAL LOGGING
+# =========================================================
+logging:
+  level: INFO
+  file: /opt/monsum/logs/agent.log
+  max_size_mb: 20
+  backup_count: 5
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+
+# =========================================================
+# AGENT CONFIGURATION
+# =========================================================
+agent:
+  id: mongo-agent-01
+  deployment_id: mongo-demo-01
+
+  # Jump server / aggregator
+  aggregator_url: http://127.0.0.1:8080
+
+  # How often to send payloads (seconds)
+  send_interval: 30
+
+  # Paths used by the agent
+  paths:
+    offset_dir: /opt/monsum/state
+
+  # MongoDB-specific settings
+  mongo:
+    uri: mongodb://localhost:27017
+    log_file: /var/log/mongodb/mongod.log
+    slow_ms: 300
+
+
+# =========================================================
+# AGGREGATOR CONFIGURATION
+# (Used by aggregator.py, not agent.py)
+# =========================================================
+aggregator:
+  id: mongo-aggregator-01
+
+  server:
+    bind_host: 0.0.0.0
+    port: 8080
+
+  ai:
+    model: gpt-4.1-mini
+    max_tokens: 3000
+    temperature: 0.2
+
+  trimming:
+    drop_fields:
+      - raw_metrics
+      - logs
+      - full_index_details
+
+  feeds:
+    mongo_cve: https://raw.githubusercontent.com/mongodb/docs-assets/master/security/vulnerabilities.json
+    osv_api: https://api.osv.dev/v1/query
+
+  mongo:
+    supported_majors:
+      - "6.0"
+      - "7.0"
+      - "8.0"
+    preferred_major: "7.0"
+
+
+# =========================================================
+# OPTIONAL: HOST METRIC THRESHOLDS
+# (Future use by AI / rules engine)
+# =========================================================
+thresholds:
+  cpu_high_percent: 80
+  memory_high_percent: 75
+  disk_high_percent: 85
+  replication_lag_seconds: 30
