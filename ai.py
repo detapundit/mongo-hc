@@ -1,45 +1,40 @@
-import logging
-
-# Initialize logger
-logger = logging.getLogger("aggregator")
-
-# Optional: if using config.yaml logging settings
+import json
 import yaml
-with open("/opt/agg-monsum/config.yaml") as f:
+import requests
+from datetime import datetime, timezone
+from collections import defaultdict
+from typing import Dict, List
+from dotenv import load_dotenv
+import os
+
+from flask import Flask, request, jsonify
+from openai import OpenAI
+import tiktoken
+
+
+# ---------------- CONFIG LOADING ---------------- #
+
+CONFIG_PATH = "/opt/agg-monsum/config.yaml"
+
+with open(CONFIG_PATH, "r") as f:
     CONFIG = yaml.safe_load(f)
 
-LOG_CFG = CONFIG.get("logging", {})
-level = getattr(logging, LOG_CFG.get("level", "INFO").upper(), logging.INFO)
-log_file = LOG_CFG.get("file", "aggregator.log")
-fmt = LOG_CFG.get("format", "%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-max_bytes = LOG_CFG.get("max_size_mb", 10) * 1024 * 1024
-backup_count = LOG_CFG.get("backup_count", 3)
+AGG = CONFIG["aggregator"]
 
-handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
-formatter = logging.Formatter(fmt)
-handler.setFormatter(formatter)
+AGGREGATOR_ID = AGG["id"]
+OPENAI_MODEL = AGG["ai"]["model"]
+MAX_AI_TOKENS = AGG["ai"]["max_tokens"]
+AI_TEMPERATURE = AGG["ai"]["temperature"]
 
-logger.addHandler(handler)
-logger.setLevel(level)
+MONGO_CVE_FEED = AGG["feeds"]["mongo_cve"]
+OSV_API = AGG["feeds"]["osv_api"]
 
-
-  File "/opt/agg-monsum/agg_ai.py", line 276, in ingest
-    logger.warning("Invalid ingest payload: %s", payload)
-
-
-  File "/opt/agg-monsum/agg_ai.py", line 68, in <module>
-    client = OpenAI()
-             ^^^^^^^^
-  File "/opt/agg-monsum/venv/lib64/python3.12/site-packages/openai/_client.py", line 137, in __init__
-    raise OpenAIError(
-openai.OpenAIError: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable
-
-
+LATEST_MONGO_MAJOR = AGG["mongo"]["preferred_major"]
+TRIM_FIELDS = set(AGG["trimming"]["drop_fields"])
 
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-
 
 def setup_logging(cfg: dict):
     log_cfg = cfg.get("logging", {})
@@ -70,15 +65,200 @@ def setup_logging(cfg: dict):
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
-setup_logging(CONFIG)
-logger = logging.getLogger("aggregator")
+# ---------------- APP INIT ---------------- #
 
-logger.info("Aggregator starting")
-logger.info("Aggregator ID: %s", AGGREGATOR_ID)
-logger.info("Listening on %s:%s",
-            AGG["server"]["bind_host"],
-            AGG["server"]["port"])
+app = Flask(__name__)
+load_dotenv("/opt/agg-monsum/aggregator.env")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+DEPLOYMENTS: Dict[str, dict] = {}
+
+# ---------------- TOKEN CONTROL ---------------- #
+
+def count_tokens(text: str) -> int:
+    enc = tiktoken.encoding_for_model(OPENAI_MODEL)
+    return len(enc.encode(text))
+
+def trim_payload(payload: dict, max_tokens: int) -> dict:
+    serialized = json.dumps(payload)
+    if count_tokens(serialized) <= max_tokens:
+        return payload
+
+    trimmed = payload.copy()
+    for field in TRIM_FIELDS:
+        trimmed.pop(field, None)
+
+    return trimmed
+
+# ---------------- TOPOLOGY ---------------- #
+
+def detect_topology(agent_payload: dict) -> dict:
+    topo = agent_payload.get("topology", {})
+    if topo.get("sharded"):
+        return {"type": "sharded", "cluster": topo.get("cluster")}
+    if topo.get("replicaSet"):
+        return {"type": "replicaset", "rs": topo.get("replicaSet")}
+    return {"type": "standalone"}
+
+# ---------------- INDEX ADVISOR ---------------- #
+
+def analyze_indexes(slow_queries: List[dict], indexes: dict) -> dict:
+    recommendations = []
+    redundant = []
+
+    seen_patterns = set()
+
+    for q in slow_queries:
+        shape = tuple(sorted(q.get("filter", {}).keys()))
+        if not shape or shape in seen_patterns:
+            continue
+        seen_patterns.add(shape)
+
+        recommendations.append({
+            "namespace": q["ns"],
+            "suggested_index": list(shape),
+            "reason": "Observed in slow query filter"
+        })
+
+    index_keys = defaultdict(list)
+    for ns, idxs in indexes.items():
+        for idx in idxs:
+            key = tuple(idx["key"].keys())
+            index_keys[(ns, key)].append(idx["name"])
+
+    for (ns, key), names in index_keys.items():
+        if len(names) > 1:
+            redundant.append({
+                "namespace": ns,
+                "index_keys": list(key),
+                "indexes": names
+            })
+
+    return {
+        "recommended_indexes": recommendations,
+        "redundant_indexes": redundant
+    }
+
+# ---------------- CVE LOOKUP ---------------- #
+
+def lookup_os_cves(packages: List[dict]) -> List[dict]:
+    findings = []
+
+    for p in packages:
+        query = {
+            "package": {
+                "name": p["name"],
+                "ecosystem": "Linux"
+            }
+        }
+        try:
+            r = requests.post(OSV_API, json=query, timeout=5)
+            if not r.ok:
+                continue
+            for v in r.json().get("vulns", []):
+                findings.append({
+                    "package": p["name"],
+                    "cve": v["id"],
+                    "summary": v.get("summary")
+                })
+        except Exception:
+            continue
+
+    return findings
+
+# ---------------------- CVE LOOKUPS ---------------------- #
+def lookup_os_cves(packages: List[dict]) -> List[dict]:
+    findings = []
+
+    logger.info("OS CVE lookup started | packages=%d", len(packages))
+
+    for p in packages:
+        try:
+            r = requests.post(OSV_API, json={
+                "package": {"name": p["name"], "ecosystem": "Linux"}
+            }, timeout=5)
+
+            if not r.ok:
+                logger.debug("OSV lookup failed for package %s", p["name"])
+                continue
+
+            for v in r.json().get("vulns", []):
+                findings.append({
+                    "package": p["name"],
+                    "cve": v["id"],
+                    "summary": v.get("summary")
+                })
+
+        except Exception as e:
+            logger.debug("OSV exception for %s: %s", p["name"], e)
+
+    logger.info("OS CVE findings=%d", len(findings))
+    return findings
+# ---------------- VERSION ADVISOR ---------------- #
+
+SUPPORTED_MAJORS = AGG["mongo"]["supported_majors"]
+PREFERRED_MAJOR = AGG["mongo"]["preferred_major"]
+
+def mongo_upgrade_advisor(current_version: str) -> dict:
+    current_major = ".".join(current_version.split(".")[:2])
+
+    if current_major in SUPPORTED_MAJORS:
+        if current_major == PREFERRED_MAJOR:
+            return {
+                "status": "optimal",
+                "current": current_version
+            }
+        return {
+            "status": "supported_but_not_preferred",
+            "current": current_version,
+            "recommended": PREFERRED_MAJOR
+        }
+
+    return {
+        "status": "upgrade_required",
+        "current": current_version,
+        "recommended": PREFERRED_MAJOR
+    }
+# ---------------- AI SUMMARY ---------------- #
+
+def generate_ai_summary(deployment: dict) -> str:
+    trimmed = trim_payload(deployment, MAX_AI_TOKENS)
+
+    system_prompt = """
+You are a senior MongoDB SRE.
+
+Analyze the deployment summary and provide:
+- Key risks
+- Performance bottlenecks
+- Index recommendations
+- Security vulnerabilities (MongoDB + OS)
+- Upgrade advice
+- Overall health verdict
+
+Be concise and technical.
+"""
+    logger.info(
+        "Generating AI summary | deployment=%s | tokens=%d",
+        deployment.get("deployment_id"),
+        count_tokens(json.dumps(trimmed))
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(trimmed, indent=2)}
+            ],
+            temperature=AI_TEMPERATURE
+        )
+        return response.choices[0].message.content
+
+    except Exception:
+        logger.exception("AI summary generation failed")
+        return "AI summary unavailable"
+
+# ---------------- INGEST API ---------------- #
 
 @app.route("/ingest", methods=["POST"])
 def ingest():
@@ -109,6 +289,8 @@ def ingest():
 
     return jsonify({"status": "ok", "aggregator": AGGREGATOR_ID})
 
+# ---------------- SUMMARY API ---------------- #
+
 @app.route("/summary/<deployment_id>")
 def summary(deployment_id):
     logger.info("Summary requested for deployment %s", deployment_id)
@@ -129,62 +311,7 @@ def summary(deployment_id):
 
     version = next(iter(mongo_versions))
 
-
-def lookup_os_cves(packages: List[dict]) -> List[dict]:
-    findings = []
-
-    logger.info("OS CVE lookup started | packages=%d", len(packages))
-
-    for p in packages:
-        try:
-            r = requests.post(OSV_API, json={
-                "package": {"name": p["name"], "ecosystem": "Linux"}
-            }, timeout=5)
-
-            if not r.ok:
-                logger.debug("OSV lookup failed for package %s", p["name"])
-                continue
-
-            for v in r.json().get("vulns", []):
-                findings.append({
-                    "package": p["name"],
-                    "cve": v["id"],
-                    "summary": v.get("summary")
-                })
-
-        except Exception as e:
-            logger.debug("OSV exception for %s: %s", p["name"], e)
-
-    logger.info("OS CVE findings=%d", len(findings))
-    return findings
-
-
-def generate_ai_summary(deployment: dict) -> str:
-    trimmed = trim_payload(deployment, MAX_AI_TOKENS)
-
-    logger.info(
-        "Generating AI summary | deployment=%s | tokens=%d",
-        deployment.get("deployment_id"),
-        count_tokens(json.dumps(trimmed))
-    )
-
-
-try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(trimmed, indent=2)}
-            ],
-            temperature=AI_TEMPERATURE
-        )
-        return response.choices[0].message.content
-
-    except Exception:
-        logger.exception("AI summary generation failed")
-        return "AI summary unavailable"
-
-
+# ---------------- COMPARISON API ---------------- #
 
 @app.route("/compare")
 def compare():
@@ -192,29 +319,22 @@ def compare():
 
     return jsonify({
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "deployments": [...]
+        "deployments": [
+            {
+                "deployment": did,
+                "hosts": len(d["hosts"]),
+                "mongo_versions": list(set(
+                    h.get("mongo_version") for h in d["hosts"].values()
+                ))
+            }
+            for did, d in DEPLOYMENTS.items()
+        ]
     })
 
+# ---------------- MAIN ---------------- #
 
-
-'''
-[Service]
-ExecStart=/opt/agg-monsum/venv/bin/python aggregator.py
-WorkingDirectory=/opt/agg-monsum
-Restart=always
-User=monsum
-Group=monsum
-
-# Safety
-LimitNOFILE=65536
-
-# Environment
-Environment=CONFIG_FILE=/etc/monsum/config.yaml
-
-logging:
-  level: INFO
-  file: /opt/monsum/logs/aggregator.log
-  max_size_mb: 20
-  backup_count: 5
-  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-'''
+if __name__ == "__main__":
+    app.run(
+        host=AGG["server"]["bind_host"],
+        port=AGG["server"]["port"]
+    )
