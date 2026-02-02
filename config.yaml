@@ -1,21 +1,24 @@
 agent:
-  id: mongo-agent-01
-  environment: prod
+  id: mongo-demo-01
+  interval_seconds: 60
 
-mongo:
-  uri: mongodb://localhost:27017/?replicaSet=rs0
-  slow_ms: 500
+paths:
+  data_dir: /opt/monsum/data
 
 logs:
   mongod_log: /var/log/mongodb/mongod.log
+  slow_query_threshold_ms: 300
 
-intervals:
-  host_metrics: 300
-  mongo_metrics: 900
-  index_inventory: 86400
-  package_inventory: 86400
-  send_batch: 60
+mongo:
+  uri: mongodb://localhost:27017
+  connect_timeout_ms: 2000
 
 aggregator:
-  url: http://jump-server:8080/ingest
-  timeout: 5
+  endpoint: http://localhost:8080/ingest
+  timeout_seconds: 5
+
+features:
+  collect_host_metrics: true
+  collect_mongo_metrics: true
+  collect_indexes: true
+  collect_packages: true
