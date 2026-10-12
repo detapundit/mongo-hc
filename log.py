@@ -513,3 +513,231 @@ class LogAnalyzer:
             return {
                 "total_parsed": total_parsed,
                 "total_slow_queries": total_slow,
+                "sla_compliance_pct": sla_pct,
+                "max_duration_ms": max_duration,
+                "buckets": buckets,
+                "slow_queries": unique_slow_queries[:5],
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class BaselineDeltaEngine:
+    @staticmethod
+    def process_baseline(current_metrics, baseline_path=BASELINE_FILE):
+        previous_metrics = {}
+        if os.path.exists(baseline_path):
+            try:
+                with open(baseline_path, "r") as f:
+                    previous_metrics = json.load(f)
+            except Exception:
+                previous_metrics = {}
+
+        with open(baseline_path, "w") as f:
+            json.dump(current_metrics, f, indent=2)
+
+        return previous_metrics
+
+
+def render_report(host_data, mongo_data, os_checks, log_data, prev_data):
+    def calc_delta(curr, key, suffix=""):
+        prev = prev_data.get(key, curr)
+        diff = curr - prev
+        sign = "+" if diff >= 0 else ""
+        return f"{sign}{round(diff, 2)}{suffix}"
+
+    print("=" * 80)
+    print("📊 MONGO & HOST DIAGNOSTIC ASSESSMENT REPORT")
+    print("=" * 80)
+
+    print("\n" + "=" * 80)
+    print("DEPLOYMENT & ENVIRONMENT IDENTIFICATION")
+    print("=" * 80)
+    print(f"Host Identification       : {host_data['hostname']}")
+    print(f"Platform Environment      : {mongo_data['deployment_env']} ({host_data['os_kernel']})")
+    print(f"MongoDB Version           : {mongo_data['version']}")
+    print(f"Deployment Architecture   : {mongo_data['deployment_type']}")
+    print(f"Node Role / State         : {mongo_data['node_role']}")
+    print(f"ReplicaSet Name           : {mongo_data['replset_name']}")
+    print(f"Assessment Timestamp      : {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
+    print("=" * 80)
+
+    # Executive Summary & Health Scorecard
+    print("\n" + "=" * 80)
+    print("🎯 EXECUTIVE SUMMARY & HEALTH SCORECARD")
+    print("=" * 80)
+
+    prev_used = prev_data.get("data_partition_used_gb", host_data["data_partition_used_gb"])
+    growth_gb = max(host_data["data_partition_used_gb"] - prev_used, 0.0)
+    if growth_gb > 0:
+        runway_days = str(math.floor(host_data["data_partition_free_gb"] / growth_gb)) + " Days Remaining"
+    else:
+        runway_days = "Sufficient Capacity (Low Growth)"
+
+    sla_pct = log_data.get("sla_compliance_pct", 100.0)
+    sla_status = "🟢 COMPLIANT" if sla_pct >= 99.0 else f"🔴 {sla_pct}% (Target: >99.0%)"
+
+    sec = mongo_data["security"]
+    sec_status = "🟢 COMPLIANT" if sec["auth_enabled"] and sec["tls_mode"] == "requireTLS" else "🔴 NON-COMPLIANT"
+
+    print(f"Overall Health Status      : {'🔴 CRITICAL RISK' if not sec['auth_enabled'] else '🟢 HEALTHY'}")
+    print(f"Storage Capacity Runway    : 🟡 {runway_days} (Free: {host_data['data_partition_free_gb']} GB)")
+    print(f"SLA Compliance (<100ms)    : {sla_status}")
+    print(f"Security Hardening Status  : {sec_status}")
+    print("=" * 80)
+
+    # Table 1: Host Resource Metrics
+    print("\n[1] HOST RESOURCE & DATA PARTITION METRICS")
+    print("+--------------------------------+----------------+---------------+---------------+------------------+")
+    print("| Metric                         | Previous Run   | Current Run   | Delta         | Status / Threshold")
+    print("+--------------------------------+----------------+---------------+---------------+------------------+")
+
+    read_iops_status = "🟢 NORMAL" if host_data["disk_read_iops"] < 500 else "🟡 ELEVATED"
+    write_iops_status = "🟢 NORMAL" if host_data["disk_write_iops"] < 500 else "🟡 ELEVATED"
+
+    host_metrics_table = [
+        ("Host CPU Usage (%)", "cpu_usage_pct", host_data["cpu_usage_pct"], "%", "🔴 HIGH (>80%)" if host_data["cpu_usage_pct"] > 80 else "🟢 OK"),
+        ("Host RAM Used (%)", "ram_used_pct", host_data["ram_used_pct"], "%", "🔴 HIGH (>90%)" if host_data["ram_used_pct"] > 90 else "🟢 OK"),
+        ("Swap Memory Used (%)", "swap_used_pct", host_data["swap_used_pct"], "%", "🟡 WARN (>0%)" if host_data["swap_used_pct"] > 0 else "🟢 OK"),
+        ("/data Partition Used (%)", "data_partition_used_pct", host_data["data_partition_used_pct"], "%", "🟡 WARN (>80%)" if host_data["data_partition_used_pct"] > 80 else "🟢 OK"),
+        ("Disk Read IOPS", "disk_read_iops", host_data["disk_read_iops"], "", read_iops_status),
+        ("Disk Write IOPS", "disk_write_iops", host_data["disk_write_iops"], "", write_iops_status),
+        ("Disk Read Latency (ms)", "disk_read_latency_ms", host_data["disk_read_latency_ms"], " ms", "🟡 ELEVATED" if host_data["disk_read_latency_ms"] > 10 else "🟢 NORMAL"),
+        ("Disk Write Latency (ms)", "disk_write_latency_ms", host_data["disk_write_latency_ms"], " ms", "🟡 ELEVATED" if host_data["disk_write_latency_ms"] > 10 else "🟢 NORMAL"),
+    ]
+
+    for label, key, val, suff, status in host_metrics_table:
+        prev_val = prev_data.get(key, val)
+        delta_str = calc_delta(val, key, suff)
+        print(f"| {label:<30} | {str(prev_val) + suff:<14} | {str(val) + suff:<13} | {delta_str:<13} | {status}")
+    print("+--------------------------------+----------------+---------------+---------------+------------------+")
+
+    # Table 2: Mongo Engine Metrics
+    print("\n[2] MONGODB ENGINE & PERFORMANCE METRICS")
+    print("+--------------------------------+----------------+---------------+---------------+------------------+")
+    print("| Metric                         | Previous Run   | Current Run   | Delta         | Status / Threshold")
+    print("+--------------------------------+----------------+---------------+---------------+------------------+")
+
+    conn_pct = (mongo_data["connections_active"] / max(mongo_data["connections_total_max"], 1)) * 100
+    conn_status = "🟢 OK" if conn_pct < 70 else ("🟡 ELEVATED" if conn_pct < 85 else "🔴 CRITICAL")
+
+    mongo_table = [
+        ("Insert Operations / sec", "op_insert_sec", mongo_data["op_insert_sec"], " /s", "🟢 NORMAL"),
+        ("Query Operations / sec", "op_query_sec", mongo_data["op_query_sec"], " /s", "🔴 SPIKE" if mongo_data["op_query_sec"] > 1000 else "🟢 NORMAL"),
+        ("Update Operations / sec", "op_update_sec", mongo_data["op_update_sec"], " /s", "🟢 NORMAL"),
+        ("Delete Operations / sec", "op_delete_sec", mongo_data["op_delete_sec"], " /s", "🟢 NORMAL"),
+        ("Active Connections", "connections_active", mongo_data["connections_active"], "", conn_status),
+        ("WT Cache Used (MB)", "wt_cache_used_mb", mongo_data["wt_cache_used_mb"], " MB", "🔴 CRITICAL" if mongo_data["wt_cache_used_mb"] > mongo_data["wt_cache_max_mb"] * 0.9 else "🟢 OK"),
+        ("WT Concurrent Write Tickets", "wt_write_tickets_available", mongo_data["wt_write_tickets_available"], "", "🔴 EXHAUSTED" if mongo_data["wt_write_tickets_available"] < 10 else "🟢 OK"),
+        ("Replication Lag (sec)", "repl_lag", 0.0, " s", "🟢 OK"),
+    ]
+
+    for label, key, val, suff, status in mongo_table:
+        prev_val = prev_data.get(key, val)
+        delta_str = calc_delta(val, key, suff)
+        print(f"| {label:<30} | {str(prev_val) + suff:<14} | {str(val) + suff:<13} | {delta_str:<13} | {status}")
+    print("+--------------------------------+----------------+---------------+---------------+------------------+")
+
+    # Table 3: Database & Collection Footprint (With proper width and truncation for long names)
+    if mongo_data.get("db_stats"):
+        print("\n📊 DATABASE, COLLECTION & STORAGE FOOTPRINT")
+        print("+----------------------------------+------------+------------+------------+--------------------+")
+        print("| Database Name                    | Data Size  | Index Size | Collections| Index-to-Data Ratio|")
+        print("+----------------------------------+------------+------------+------------+--------------------+")
+        for db_item in mongo_data["db_stats"]:
+            ratio_status = "🔴 BLOATED" if db_item["index_ratio"] > 100 else "🟢 NORMAL"
+            dbname_display = db_item["name"] if len(db_item["name"]) <= 32 else db_item["name"][:29] + "..."
+            print(
+                f"| {dbname_display:<32} | {str(db_item['data_size_gb']) + ' GB':<10} | "
+                f"{str(db_item['index_size_gb']) + ' GB':<10} | {db_item['collections']:<10} | "
+                f"{str(db_item['index_ratio']) + '% (' + ratio_status + ')':<18} |"
+            )
+        print("+----------------------------------+------------+------------+------------+--------------------+")
+
+    # Table 4: OS Recommended Settings Audit (Expanded Recommended Value column width to 35 chars)
+    print("\n" + "=" * 80)
+    print(f"⚙️ MONGODB PRODUCTION NOTES & RECOMMENDED SETTINGS AUDIT (v{mongo_data['version']} COMPLIANCE)")
+    print("=" * 80)
+    print("+-----------------------------------+-----------------------+-------------------------------------+---------------------+")
+    print("| Setting Parameter                 | Current System Value  | Recommended Value                   | Compliance Status   |")
+    print("+-----------------------------------+-----------------------+-------------------------------------+---------------------+")
+    for display_name, item in os_checks.items():
+        status_flag = "🟢 COMPLIANT" if item["compliant"] else "🔴 NON-COMPLIANT"
+        print(f"| {display_name:<33} | {item['current']:<21} | {item['recommended']:<35} | {status_flag:<19} |")
+    print("+-----------------------------------+-----------------------+-------------------------------------+---------------------+")
+
+    # Table 5: Security Audit
+    print("\n" + "=" * 80)
+    print("🔒 SECURITY & HARDENING COMPLIANCE AUDIT")
+    print("=" * 80)
+    print("+--------------------------+-----------------------+---------------------+")
+    print("| Security Control         | Configured Status     | Compliance Status   |")
+    print("+--------------------------+-----------------------+---------------------+")
+    print(f"| Access Control / Auth    | {'Enabled' if sec['auth_enabled'] else 'Disabled':<21} | {'🟢 COMPLIANT' if sec['auth_enabled'] else '🔴 NON-COMPLIANT':<19} |")
+    print(f"| TLS/SSL Wire Encryption  | Mode={sec['tls_mode']:<16} | {'🟢 COMPLIANT' if sec['tls_mode'] == 'requireTLS' else '🔴 NON-COMPLIANT':<19} |")
+    print(f"| Server-Side Scripting    | {'Disabled' if sec['javascript_disabled'] else 'Enabled':<21} | {'🟢 COMPLIANT' if sec['javascript_disabled'] else '🟡 WARN':<19} |")
+    print("+--------------------------+-----------------------+---------------------+")
+
+    # Table 6: Log Analysis
+    print("\n" + "=" * 80)
+    print("📋 MONGODB LOG ANALYSIS SUMMARY (JQ PARSER)")
+    print("=" * 80)
+    if "error" in log_data:
+        print(f"⚠️ Log Analysis Notice: {log_data['error']}")
+    else:
+        print(f"• Total Log Entries Parsed     : {log_data.get('total_parsed', 0)}")
+        print(f"• Total Slow Queries (>100ms)  : {log_data['total_slow_queries']} operations")
+        print(f"• Longest Query Duration       : {log_data['max_duration_ms']} ms")
+        print("\n⏱️ SLOW QUERY DURATION BUCKET DISTRIBUTION")
+        print("+--------------------------+-------------------+")
+        print("| Latency Range (ms)       | Slow Query Count  |")
+        print("+--------------------------+-------------------+")
+        for bucket, count in log_data["buckets"].items():
+            print(f"| {bucket:<24} | {count:<17} |")
+        print("+--------------------------+-------------------+")
+
+        if log_data.get("slow_queries"):
+            print("\n🔥 TOP SLOW QUERY SHAPES & INDEX SUGGESTIONS (ESR RULE)")
+            for q_group in log_data["slow_queries"]:
+                count_str = f"({q_group['count']} occurrences)" if q_group['count'] > 1 else "(1 occurrence)"
+                print(f"\n⚠️ [COLLSCAN] Namespace: {q_group['ns']} {count_str}")
+                print(f"   • Query Shape        : {q_group['query_shape']}")
+                print(f"   • Max Execution Time : {q_group['max_duration']} ms")
+                print(f"   • Max Docs Examined  : {q_group['max_docs_examined']}")
+                print("   💡 RECOMMENDED INDEX CREATION COMMAND:")
+                print("   " + "-" * 70)
+                print(f"   {q_group['recommendation']}")
+                print("   " + "-" * 70)
+
+    print("\n" + "=" * 80)
+    print("END OF DIAGNOSTIC REPORT")
+    print("=" * 80)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MongoDB and Host Diagnostic Assessment Tool")
+    parser.add_argument("--uri", default="mongodb://localhost:27017/admin", help="MongoDB Connection URI")
+    parser.add_argument("--log-file", default="/var/log/mongodb/mongod.log", help="Path to mongod.log JSON file")
+    parser.add_argument("--log-hours", type=int, default=24, help="Log analysis lookback duration in hours")
+    args = parser.parse_args()
+
+    try:
+        host_metrics = SystemCollector.get_host_metrics()
+    except Exception as e:
+        sys.exit(f"Failed to collect host metrics: {e}")
+
+    try:
+        mongo_collector = MongoCollector(args.uri)
+        mongo_metrics = mongo_collector.capture_all()
+    except PyMongoError as e:
+        sys.exit(f"Failed to connect to MongoDB: {e}")
+
+    os_checks = SystemCollector.check_os_production_settings(mongo_metrics["version"])
+    log_metrics = LogAnalyzer.analyze_log(args.log_file, hours=args.log_hours)
+    prev_metrics = BaselineDeltaEngine.process_baseline({**host_metrics, **mongo_metrics})
+
+    render_report(host_metrics, mongo_metrics, os_checks, log_metrics, prev_metrics)
+
+
+if __name__ == "__main__":
+    main()
