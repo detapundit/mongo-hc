@@ -1,0 +1,126 @@
+================================================================================
+📊 MONGO & HOST DIAGNOSTIC ASSESSMENT REPORT
+================================================================================
+
+================================================================================
+DEPLOYMENT & ENVIRONMENT IDENTIFICATION
+================================================================================
+Host Identification       : ip-172-31-17-209.ec2.internal
+Platform Environment      : Self-Hosted (Linux - 6.1.159-182.297.amzn2023.x86_64)
+MongoDB Version           : 8.0.16
+Deployment Architecture   : STANDALONE
+Node Role / State         : STANDALONE
+ReplicaSet Name           : N/A
+Assessment Timestamp      : 2026-10-12 09:30:10 IST
+================================================================================
+
+================================================================================
+🎯 EXECUTIVE SUMMARY & HEALTH SCORECARD
+================================================================================
+Overall Health Status      : 🔴 CRITICAL RISK
+Storage Capacity Runway    : 🟡 Sufficient Capacity (Low Growth) (Free: 4.26 GB)
+SLA Compliance (<100ms)    : 🔴 80.38% (Target: >99.0%)
+Security Hardening Status  : 🔴 NON-COMPLIANT
+================================================================================
+
+[1] HOST RESOURCE & DATA PARTITION METRICS
++--------------------------------+----------------+---------------+---------------+------------------+
+| Metric                         | Previous Run   | Current Run   | Delta         | Status / Threshold
++--------------------------------+----------------+---------------+---------------+------------------+
+| Host CPU Usage (%)             | 52.5%          | 53.8%         | +1.3%         | 🟢 OK
+| Host RAM Used (%)              | 29.6%          | 29.6%         | +0.0%         | 🟢 OK
+| Swap Memory Used (%)           | 0.0%           | 0.0%          | +0.0%         | 🟢 OK
+| /data Partition Used (%)       | 78.7%          | 78.6%         | -0.1%         | 🟢 OK
+| Disk Read IOPS                 | 0              | 0             | +0            | 🟢 NORMAL
+| Disk Write IOPS                | 0              | 1             | +1            | 🟢 NORMAL
+| Disk Read Latency (ms)         | 0.0 ms         | 0.0 ms        | +0.0 ms       | 🟢 NORMAL
+| Disk Write Latency (ms)        | 0.0 ms         | 1.0 ms        | +1.0 ms       | 🟢 NORMAL
++--------------------------------+----------------+---------------+---------------+------------------+
+
+[2] MONGODB ENGINE & PERFORMANCE METRICS
++--------------------------------+----------------+---------------+---------------+------------------+
+| Metric                         | Previous Run   | Current Run   | Delta         | Status / Threshold
++--------------------------------+----------------+---------------+---------------+------------------+
+| Insert Operations / sec        | 0 /s           | 0 /s          | +0 /s         | 🟢 NORMAL
+| Query Operations / sec         | 24 /s          | 17 /s         | -7 /s         | 🟢 NORMAL
+| Update Operations / sec        | 0 /s           | 0 /s          | +0 /s         | 🟢 NORMAL
+| Delete Operations / sec        | 0 /s           | 0 /s          | +0 /s         | 🟢 NORMAL
+| Active Connections             | 11             | 11            | +0            | 🟢 OK
+| WT Cache Used (MB)             | 245.35 MB      | 245.35 MB     | +0.0 MB       | 🟢 OK
+| WT Concurrent Write Tickets    | 128            | 128           | +0            | 🟢 OK
+| Replication Lag (sec)          | 0.0 s          | 0.0 s         | +0.0 s        | 🟢 OK
++--------------------------------+----------------+---------------+---------------+------------------+
+
+📊 DATABASE, COLLECTION & STORAGE FOOTPRINT
++--------------------+------------+------------+------------+--------------------+
+| Database Name      | Data Size  | Index Size | Collections| Index-to-Data Ratio|
++--------------------+------------+------------+------------+--------------------+
+| READ_ME_TO_RECOVER_YOUR_DATA | 0.0 GB     | 0.0 GB     | 1          | 0.0% (🟢 NORMAL)    |
+| loadtest           | 0.19 GB    | 0.01 GB    | 1          | 5.3% (🟢 NORMAL)    |
++--------------------+------------+------------+------------+--------------------+
+
+================================================================================
+⚙️ MONGODB PRODUCTION NOTES & RECOMMENDED SETTINGS AUDIT (v8.0.16 COMPLIANCE)
+================================================================================
++-----------------------------------+-----------------------+-----------------------+---------------------+
+| Setting Parameter                 | Current System Value  | Recommended Value     | Compliance Status   |
++-----------------------------------+-----------------------+-----------------------+---------------------+
+| Transparent Huge Pages (THP)      | madvise               | [always] or [madvise] (v8.0+) | 🟢 COMPLIANT         |
+| Kernel Swappiness (vm.swappiness) | 60                    | 1 (or 0)              | 🔴 NON-COMPLIANT     |
+| NUMA Zone Reclaim Mode            | Zone Rec=0            | Disabled / Zone Rec=0 | 🟢 COMPLIANT         |
+| File Descriptors (ulimit -n)      | 65535                 | >= 64,000             | 🟢 COMPLIANT         |
+| Max Processes (ulimit -u)         | unlimited (-1)        | >= 64,000             | 🟢 COMPLIANT         |
+| TCP Keepalive (sec)               | 7200                  | 120                   | 🔴 NON-COMPLIANT     |
++-----------------------------------+-----------------------+-----------------------+---------------------+
+
+================================================================================
+🔒 SECURITY & HARDENING COMPLIANCE AUDIT
+================================================================================
++--------------------------+-----------------------+---------------------+
+| Security Control         | Configured Status     | Compliance Status   |
++--------------------------+-----------------------+---------------------+
+| Access Control / Auth    | Disabled              | 🔴 NON-COMPLIANT     |
+| TLS/SSL Wire Encryption  | Mode=disabled         | 🔴 NON-COMPLIANT     |
+| Server-Side Scripting    | Enabled               | 🟡 WARN              |
++--------------------------+-----------------------+---------------------+
+
+================================================================================
+📋 MONGODB LOG ANALYSIS SUMMARY (JQ PARSER)
+================================================================================
+• Total Log Entries Parsed     : 2054
+• Total Slow Queries (>100ms)  : 403 operations
+• Longest Query Duration       : 1015 ms
+
+⏱️ SLOW QUERY DURATION BUCKET DISTRIBUTION
++--------------------------+-------------------+
+| Latency Range (ms)       | Slow Query Count  |
++--------------------------+-------------------+
+| 101-500ms                | 401               |
+| 501-1000ms               | 1                 |
+| 1001-2000ms              | 1                 |
+| >2001ms                  | 0                 |
++--------------------------+-------------------+
+
+🔥 TOP SLOW QUERY SHAPES & INDEX SUGGESTIONS (ESR RULE)
+
+⚠️ [COLLSCAN] Namespace: loadtest.orders (1 occurrence)
+   • Query Shape        : queryHash:B770E1E9
+   • Max Execution Time : 1015 ms
+   • Max Docs Examined  : 1000000
+   💡 RECOMMENDED INDEX CREATION COMMAND:
+   ----------------------------------------------------------------------
+   db.orders.createIndex({ "<field_name>": 1 })
+   ----------------------------------------------------------------------
+
+⚠️ [COLLSCAN] Namespace: loadtest.orders (402 occurrences)
+   • Query Shape        : queryHash:DB05110E
+   • Max Execution Time : 533 ms
+   • Max Docs Examined  : 989851
+   💡 RECOMMENDED INDEX CREATION COMMAND:
+   ----------------------------------------------------------------------
+   db.orders.createIndex({"customerId":  1})
+   ----------------------------------------------------------------------
+
+================================================================================
+END OF DIAGNOSTIC REPORT
+================================================================================
